@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Required to reach https://crossfit1000hills.com/calendar/api.php in release builds. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Step counting (Android 10+ asks the user for "Physical activity"). -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+    <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false"/>
+    <uses-feature android:name="android.hardware.sensor.stepdetector" android:required="false"/>
+
     <application
-        android:label="gymone_app"
+        android:label="CrossFit 1000 Hills"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

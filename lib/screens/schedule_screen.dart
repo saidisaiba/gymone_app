@@ -1,556 +1,211 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import '../services/api_service.dart';
 
-class DashboardScreen extends StatefulWidget {
-  const DashboardScreen({Key? key}) : super(key: key);
+import '../models/user_model.dart';
+import '../services/api_service.dart';
+import '../theme.dart';
+import '../widgets/common.dart';
+
+/// Class schedule. Members can book and cancel; coaches and admins see attendance numbers.
+class ScheduleScreen extends StatefulWidget {
+  final UserModel user;
+  const ScheduleScreen({super.key, required this.user});
 
   @override
-  State<DashboardScreen> createState() => _DashboardScreenState();
+  State<ScheduleScreen> createState() => _ScheduleScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
-  int _currentIndex = 0;
-  int? _userId;
-  String _userName = 'Member';
-
-  // Exact Theme Colors matching the CrossFit 1000 Hills Web Theme
-  static const Color bgDark = Color(0xFF0C1611);
-  static const Color cardBg = Color(0xFF14221A);
-  static const Color accentLime = Color(0xFF84CC16);
-  static const Color textLight = Color(0xFFE5E7EB);
+class _ScheduleScreenState extends State<ScheduleScreen> {
+  List<Map<String, dynamic>> _classes = [];
+  Map<String, int> _bookingByClass = {}; // class_id -> booking_id
+  bool _loading = true;
+  bool _offline = false;
+  bool _showPast = false;
+  final Set<String> _busy = {};
 
   @override
   void initState() {
     super.initState();
-    _loadUserSession();
+    _load();
   }
 
-  Future<void> _loadUserSession() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _userId = prefs.getInt('user_id');
-      final userDataStr = prefs.getString('user_data');
-      if (userDataStr != null) {
-        final userMap = jsonDecode(userDataStr);
-        if (userMap['name'] != null) {
-          _userName = userMap['name'];
-        }
+  Future<void> _load() async {
+    final classes = await ApiService.getClasses();
+    var offline = ApiService.lastResultFromCache;
+    final bookings = <String, int>{};
+    if (widget.user.isMember) {
+      for (final b in await ApiService.getUserBookings()) {
+        if (b is Map) bookings['${b['class_id']}'] = int.tryParse('${b['id']}') ?? 0;
       }
+      offline = offline || ApiService.lastResultFromCache;
+    }
+    if (!mounted) return;
+    setState(() {
+      _classes = classes.whereType<Map>().map((c) => Map<String, dynamic>.from(c)).toList()
+        ..sort((a, b) => '${a['class_time']}'.compareTo('${b['class_time']}'));
+      _bookingByClass = bookings;
+      _offline = offline;
+      _loading = false;
     });
+  }
+
+  Future<void> _book(Map<String, dynamic> c) async {
+    final id = '${c['id']}';
+    setState(() => _busy.add(id));
+    final ok = await ApiService.bookClass(id);
+    if (!mounted) return;
+    setState(() => _busy.remove(id));
+    showMessage(context, ok ? 'Your place is reserved. See you at the gym! 🏋️' : ApiService.lastError, error: !ok);
+    _load();
+  }
+
+  Future<void> _cancel(Map<String, dynamic> c) async {
+    final id = '${c['id']}';
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel booking?'),
+        content: Text('Free your spot in ${c['title'] ?? 'this class'} (${formatClassTime(c['class_time'])}) for someone else?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep it')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.danger, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Cancel booking'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    setState(() => _busy.add(id));
+    final ok = await ApiService.cancelBooking(_bookingByClass[id] ?? 0);
+    if (!mounted) return;
+    setState(() => _busy.remove(id));
+    showMessage(context, ok ? 'Booking cancelled.' : ApiService.lastError, error: !ok);
+    _load();
   }
 
   @override
   Widget build(BuildContext context) {
-    final List<Widget> _pages = [
-      ScheduleTab(userId: _userId, userName: _userName),
-      BookingsTab(userId: _userId),
-      HealthMetricsTab(userId: _userId),
-    ];
+    final now = DateTime.now();
+    final visible = _classes.where((c) {
+      final t = parseClassTime(c['class_time']);
+      return _showPast || t == null || t.isAfter(now.subtract(const Duration(hours: 1)));
+    }).toList();
+
+    final rows = <Widget>[];
+    String? lastHeader;
+    for (final c in visible) {
+      final t = parseClassTime(c['class_time']);
+      final header = t == null ? 'Classes' : formatDayHeader(t);
+      if (header != lastHeader) {
+        rows.add(Padding(
+          padding: const EdgeInsets.only(top: 12, bottom: 8),
+          child: Text(header, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15)),
+        ));
+        lastHeader = header;
+      }
+      rows.add(_classCard(c));
+    }
 
     return Scaffold(
-      backgroundColor: bgDark,
-      body: _pages[_currentIndex],
-      bottomNavigationBar: BottomNavigationBar(
-        backgroundColor: cardBg,
-        selectedItemColor: accentLime,
-        unselectedItemColor: Colors.grey,
-        currentIndex: _currentIndex,
-        onTap: (index) => setState(() => _currentIndex = index),
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.fitness_center),
-            label: 'Schedule',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.bookmark),
-            label: 'My Bookings',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.monitor_weight),
-            label: 'Health Metrics',
+      appBar: AppBar(
+        title: Text(widget.user.isCoach ? 'My Classes' : 'Class Schedule'),
+        actions: [
+          IconButton(
+            tooltip: _showPast ? 'Hide past classes' : 'Show past classes',
+            icon: Icon(_showPast ? Icons.history_toggle_off : Icons.history),
+            onPressed: () => setState(() => _showPast = !_showPast),
           ),
         ],
       ),
+      body: RefreshIndicator(
+        color: AppColors.lime,
+        onRefresh: _load,
+        child: _loading
+            ? ListView(children: const [Loading()])
+            : ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  if (_offline) const OfflineBanner(),
+                  if (visible.isEmpty)
+                    InfoCard(ApiService.lastError.isNotEmpty && !_offline ? ApiService.lastError : 'No upcoming classes scheduled.')
+                  else
+                    ...rows,
+                ],
+              ),
+      ),
     );
   }
-}
 
-// ==========================================
-// TAB 1: SCHEDULE & BOOKING
-// ==========================================
-class ScheduleTab extends StatefulWidget {
-  final int? userId;
-  final String userName;
-  const ScheduleTab({Key? key, required this.userId, required this.userName})
-      : super(key: key);
+  Widget _classCard(Map<String, dynamic> c) {
+    final id = '${c['id']}';
+    final booked = _bookingByClass.containsKey(id);
+    final capacity = int.tryParse('${c['capacity'] ?? ''}');
+    final count = int.tryParse('${c['booked_count'] ?? ''}');
+    final spots = int.tryParse('${c['available_spots'] ?? ''}') ?? (capacity != null && count != null ? capacity - count : null);
+    final full = c['is_full'] == true || c['is_full'] == 1 || (spots != null && spots <= 0);
+    final t = parseClassTime(c['class_time']);
+    final past = t != null && t.isBefore(DateTime.now());
+    final coach = c['coach_name'] ?? c['coach'];
 
-  @override
-  State<ScheduleTab> createState() => _ScheduleTabState();
-}
-
-class _ScheduleTabState extends State<ScheduleTab> {
-  bool _isLoading = true;
-  List<dynamic> _classes = [];
-  String? _errorMessage;
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchClasses();
-  }
-
-  Future<void> _fetchClasses() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    try {
-      final response = await ApiService.getClasses();
-      if (response['status'] == 'success') {
-        setState(() {
-          _classes = response['classes'] ?? [];
-          _isLoading = false;
-        });
-      } else {
-        setState(() {
-          _errorMessage = response['message'] ?? 'Failed to load classes.';
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Error: $e';
-        _isLoading = false;
-      });
-    }
-  }
-
-  Future<void> _bookClass(int classId, String className) async {
-    if (widget.userId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        constSnackBar(
-            content: Text('User session missing. Please log in again.'),
-            backgroundColor: Colors.redAccent),
-      );
-      return;
-    }
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(
-          child: CircularProgressIndicator(color: Color(0xFF84CC16))),
-    );
-
-    try {
-      final response = await ApiService.bookClass(widget.userId!, classId);
-      Navigator.pop(context);
-
-      if (response['status'] == 'success') {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Successfully booked class!'),
-              backgroundColor: Color(0xFF84CC16)),
+    Widget? action;
+    if (widget.user.isMember && !past) {
+      if (_busy.contains(id)) {
+        action = const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.lime));
+      } else if (booked) {
+        action = OutlinedButton(
+          style: OutlinedButton.styleFrom(foregroundColor: AppColors.danger, side: const BorderSide(color: AppColors.danger)),
+          onPressed: _offline ? null : () => _cancel(c),
+          child: const Text('Cancel'),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(response['message'] ?? 'Booking failed.'),
-              backgroundColor: Colors.redAccent),
-        );
+        action = ElevatedButton(onPressed: full || _offline ? null : () => _book(c), child: Text(full ? 'Full' : 'Book'));
       }
-    } catch (e) {
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.redAccent),
-      );
     }
-  }
 
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(20.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 20),
-          // Welcome Banner
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: const Color(0xFF14221A),
-              borderRadius: BorderRadius.circular(12),
-              border:
-                  Border.all(color: const Color(0xFF84CC16).withOpacity(0.3)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('CROSSFIT 1000 HILLS',
-                    style: TextStyle(
-                        color: Color(0xFF84CC16),
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.2)),
-                const SizedBox(height: 6),
-                Text('Welcome, ${widget.userName}!',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold)),
-                const SizedBox(height: 4),
-                const Text(
-                    'Select an available WOD session below to reserve your spot.',
-                    style: TextStyle(color: Colors.grey, fontSize: 13)),
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: cardDecoration(borderOpacity: booked ? 0.9 : 0.25),
+      child: Row(children: [
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Flexible(
+                child: Text('${c['title'] ?? c['name'] ?? 'CrossFit Class'}',
+                    style: TextStyle(color: past ? Colors.grey : AppColors.lime, fontWeight: FontWeight.bold, fontSize: 15)),
+              ),
+              if (booked) ...[
+                const SizedBox(width: 8),
+                const Icon(Icons.check_circle, color: AppColors.lime, size: 16),
               ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          const Text('Available Classes',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold)),
-          const SizedBox(height: 10),
-          Expanded(
-            child: _isLoading
-                ? const Center(
-                    child: CircularProgressIndicator(color: Color(0xFF84CC16)))
-                : _errorMessage != null
-                    ? Center(
-                        child: Text(_errorMessage!,
-                            style: const TextStyle(color: Colors.redAccent)))
-                    : _classes.isEmpty
-                        ? const Center(
-                            child: Text('No classes scheduled right now.',
-                                style: TextStyle(color: Colors.grey)))
-                        : ListView.builder(
-                            itemCount: _classes.length,
-                            itemBuilder: (context, index) {
-                              final item = _classes[index];
-                              final className = item['name'] ??
-                                  item['title'] ??
-                                  'CrossFit WOD';
-                              final classTime =
-                                  item['date'] ?? item['time'] ?? 'TBD';
-                              final classId =
-                                  int.tryParse(item['id'].toString()) ?? 0;
-
-                              return Container(
-                                margin: const EdgeInsets.symmetric(vertical: 6),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF14221A),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: Colors.white12),
-                                ),
-                                child: ListTile(
-                                  leading: const Icon(Icons.bolt,
-                                      color: Color(0xFF84CC16)),
-                                  title: Text(className,
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontWeight: FontWeight.bold)),
-                                  subtitle: Text('Time: $classTime',
-                                      style:
-                                          const TextStyle(color: Colors.grey)),
-                                  trailing: ElevatedButton(
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: const Color(0xFF84CC16),
-                                      foregroundColor: const Color(0xFF0C1611),
-                                    ),
-                                    onPressed: () =>
-                                        _bookClass(classId, className),
-                                    child: const Text('Book',
-                                        style: TextStyle(
-                                            fontWeight: FontWeight.bold)),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ==========================================
-// TAB 2: MY BOOKINGS
-// ==========================================
-class BookingsTab extends StatefulWidget {
-  final int? userId;
-  const BookingsTab({Key? key, required this.userId}) : super(key: key);
-
-  @override
-  State<BookingsTab> createState() => _BookingsTabState();
-}
-
-class _BookingsTabState extends State<BookingsTab> {
-  bool _isLoading = true;
-  List<dynamic> _bookings = [];
-  String? _errorMessage;
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchBookings();
-  }
-
-  Future<void> _fetchBookings() async {
-    if (widget.userId == null) {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'User session not found.';
-      });
-      return;
-    }
-
-    try {
-      final response = await ApiService.getUserBookings(widget.userId!);
-      if (response['status'] == 'success') {
-        setState(() {
-          _bookings = response['bookings'] ?? [];
-          _isLoading = false;
-        });
-      } else {
-        setState(() {
-          _errorMessage = response['message'] ?? 'Failed to load bookings.';
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Error: $e';
-        _isLoading = false;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(20.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 20),
-          const Text('My Reserved Classes',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          Expanded(
-            child: _isLoading
-                ? const Center(
-                    child: CircularProgressIndicator(color: Color(0xFF84CC16)))
-                : _errorMessage != null
-                    ? Center(
-                        child: Text(_errorMessage!,
-                            style: const TextStyle(color: Colors.redAccent)))
-                    : _bookings.isEmpty
-                        ? const Center(
-                            child: Text('You have not booked any classes yet.',
-                                style: TextStyle(color: Colors.grey)))
-                        : ListView.builder(
-                            itemCount: _bookings.length,
-                            itemBuilder: (context, index) {
-                              final booking = _bookings[index];
-                              return Container(
-                                margin: const EdgeInsets.symmetric(vertical: 6),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF14221A),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                      color: const Color(0xFF84CC16)
-                                          .withOpacity(0.2)),
-                                ),
-                                child: ListTile(
-                                  leading: const Icon(Icons.check_circle,
-                                      color: Color(0xFF84CC16)),
-                                  title: Text(
-                                      booking['name'] ?? 'Workout Session',
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontWeight: FontWeight.bold)),
-                                  subtitle: Text(
-                                      'Time: ${booking['date'] ?? 'TBD'}',
-                                      style:
-                                          const TextStyle(color: Colors.grey)),
-                                ),
-                              );
-                            },
-                          ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ==========================================
-// TAB 3: HEALTH METRICS
-// ==========================================
-class HealthMetricsTab extends StatefulWidget {
-  final int? userId;
-  const HealthMetricsTab({Key? key, required this.userId}) : super(key: key);
-
-  @override
-  State<HealthMetricsTab> createState() => _HealthMetricsTabState();
-}
-
-class _HealthMetricsTabState extends State<HealthMetricsTab> {
-  final _weightController = TextEditingController();
-  final _heightController = TextEditingController();
-  final _bodyFatController = TextEditingController();
-  bool _isLoading = true;
-  List<dynamic> _metrics = [];
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchMetrics();
-  }
-
-  Future<void> _fetchMetrics() async {
-    if (widget.userId == null) return;
-    try {
-      final response = await ApiService.getHealthMetrics(widget.userId!);
-      if (response['status'] == 'success') {
-        setState(() {
-          _metrics = response['metrics'] ?? [];
-          _isLoading = false;
-        });
-      } else {
-        setState(() => _isLoading = false);
-      }
-    } catch (e) {
-      setState(() => _isLoading = false);
-    }
-  }
-
-  Future<void> _submitMetrics() async {
-    if (widget.userId == null) return;
-    final weight = double.tryParse(_weightController.text);
-    final height = double.tryParse(_heightController.text);
-    final bodyFat = double.tryParse(_bodyFatController.text);
-
-    final response = await ApiService.saveHealthMetrics(widget.userId!,
-        weight: weight, height: height, bodyFat: bodyFat);
-    if (response['status'] == 'success') {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Metrics saved successfully!'),
-          backgroundColor: Color(0xFF84CC16)));
-      _weightController.clear();
-      _heightController.clear();
-      _bodyFatController.clear();
-      _fetchMetrics();
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(response['message'] ?? 'Failed to save.'),
-          backgroundColor: Colors.redAccent));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(20.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 20),
-          const Text('Health & Fitness Metrics',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
-          // Input Form Container
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: const Color(0xFF14221A),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Column(
-              children: [
-                TextField(
-                  controller: _weightController,
-                  keyboardType: TextInputType.number,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(
-                      labelText: 'Weight (kg)',
-                      labelStyle: TextStyle(color: Colors.grey)),
-                ),
-                TextField(
-                  controller: _heightController,
-                  keyboardType: TextInputType.number,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(
-                      labelText: 'Height (cm)',
-                      labelStyle: TextStyle(color: Colors.grey)),
-                ),
-                TextField(
-                  controller: _bodyFatController,
-                  keyboardType: TextInputType.number,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(
-                      labelText: 'Body Fat (%)',
-                      labelStyle: TextStyle(color: Colors.grey)),
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF84CC16),
-                    foregroundColor: const Color(0xFF0C1611),
-                    minimumSize: const Size(double.infinity, 45),
+            ]),
+            const SizedBox(height: 4),
+            Text(t == null ? '${c['class_time'] ?? ''}' : formatClassTime(c['class_time']).split('• ').last,
+                style: const TextStyle(color: Colors.white70, fontSize: 13)),
+            if (coach != null && '$coach'.isNotEmpty) Text('Coach: $coach', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+            if (spots != null && capacity != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(children: [
+                  Expanded(
+                    child: LinearProgressIndicator(
+                      value: capacity == 0 ? 1 : ((capacity - spots) / capacity).clamp(0.0, 1.0),
+                      backgroundColor: Colors.white10,
+                      color: full ? AppColors.danger : AppColors.lime,
+                      minHeight: 4,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
-                  onPressed: _submitMetrics,
-                  child: const Text('Save Metrics',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          const Text('History',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          Expanded(
-            child: _isLoading
-                ? const Center(
-                    child: CircularProgressIndicator(color: Color(0xFF84CC16)))
-                : _metrics.isEmpty
-                    ? const Center(
-                        child: Text('No recorded metrics yet.',
-                            style: TextStyle(color: Colors.grey)))
-                    : ListView.builder(
-                        itemCount: _metrics.length,
-                        itemBuilder: (context, index) {
-                          final m = _metrics[index];
-                          return ListTile(
-                            title: Text(
-                                'Weight: ${m['weight'] ?? 'N/A'} kg | Height: ${m['height'] ?? 'N/A'} cm',
-                                style: const TextStyle(color: Colors.white)),
-                            subtitle: Text(
-                                'Recorded: ${m['created_at'] ?? 'Recent'}',
-                                style: const TextStyle(color: Colors.grey)),
-                          );
-                        },
-                      ),
-          ),
-        ],
-      ),
+                  const SizedBox(width: 8),
+                  Text(full ? 'Full' : '$spots of $capacity spots left',
+                      style: TextStyle(color: full ? AppColors.danger : Colors.white54, fontSize: 11)),
+                ]),
+              ),
+          ]),
+        ),
+        if (action != null) ...[const SizedBox(width: 12), action],
+      ]),
     );
   }
 }
