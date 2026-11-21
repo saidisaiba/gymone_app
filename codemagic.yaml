@@ -1,0 +1,62 @@
+# Codemagic builds the iPhone app on a cloud Mac (https://codemagic.io).
+# Connect this GitHub repository in Codemagic, then start one of these workflows.
+workflows:
+  # Works today, no Apple account needed. Produces an UNSIGNED .ipa:
+  # proves the app builds, but an iPhone will not install it until it is signed.
+  ios-unsigned:
+    name: iOS build (unsigned)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: 3.47.9
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Get packages
+        script: flutter pub get
+      - name: Run tests
+        script: flutter test
+      - name: Build iOS app without signing
+        script: flutter build ios --release --no-codesign
+      - name: Package .ipa
+        script: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qr CrossFit1000Hills-unsigned.ipa Payload
+    artifacts:
+      - CrossFit1000Hills-unsigned.ipa
+
+  # Needs an Apple Developer account. One-time setup in Codemagic:
+  #  1. Teams > Integrations > App Store Connect: add an API key and name it
+  #     "CrossFit1000Hills ASC" (or change the name below).
+  #  2. In App Store Connect, create the app with bundle ID com.crossfit1000hills.app.
+  # Then this workflow signs the app and sends it to TestFlight.
+  ios-testflight:
+    name: iOS release (TestFlight)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: CrossFit1000Hills ASC
+    environment:
+      flutter: 3.47.9
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.crossfit1000hills.app
+    scripts:
+      - name: Set up code signing
+        script: xcode-project use-profiles
+      - name: Get packages
+        script: flutter pub get
+      - name: Build signed .ipa
+        script: |
+          flutter build ipa --release \
+            --build-number=$PROJECT_BUILD_NUMBER \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
