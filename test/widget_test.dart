@@ -44,17 +44,22 @@ void main() {
 
   group('StepMath', () {
     test('Android cumulative counter', () {
-      expect(StepMath.delta(previous: null, current: 5000, firstInSession: true, countsFromZeroEachSession: false), 0);
-      expect(StepMath.delta(previous: 5000, current: 5120, firstInSession: true, countsFromZeroEachSession: false), 120);
+      expect(StepMath.delta(previous: null, current: 5000, dropMeansReboot: true), 0);
+      expect(StepMath.delta(previous: 5000, current: 5120, dropMeansReboot: true), 120);
       // reboot resets the counter
-      expect(StepMath.delta(previous: 5000, current: 40, firstInSession: false, countsFromZeroEachSession: false), 40);
+      expect(StepMath.delta(previous: 5000, current: 40, dropMeansReboot: true), 40);
       // nonsense jump is ignored
-      expect(StepMath.delta(previous: 0, current: 500000, firstInSession: false, countsFromZeroEachSession: false), 0);
+      expect(StepMath.delta(previous: 0, current: 500000, dropMeansReboot: true), 0);
     });
 
-    test('iOS counts from zero each session', () {
-      expect(StepMath.delta(previous: 9000, current: 30, firstInSession: true, countsFromZeroEachSession: true), 30);
-      expect(StepMath.delta(previous: 30, current: 55, firstInSession: false, countsFromZeroEachSession: true), 25);
+    test('iOS counts since boot too: reopening the app never re-adds the total', () {
+      // first reading after install/login is only a baseline
+      expect(StepMath.delta(previous: null, current: 10000, dropMeansReboot: false), 0);
+      // app reopened later: same since-boot total plus 250 new steps
+      expect(StepMath.delta(previous: 10000, current: 10250, dropMeansReboot: false), 250);
+      expect(StepMath.delta(previous: 10250, current: 10250, dropMeansReboot: false), 0);
+      // reboot or 7-day history drop: new baseline, nothing added
+      expect(StepMath.delta(previous: 10250, current: 300, dropMeansReboot: false), 0);
     });
   });
 

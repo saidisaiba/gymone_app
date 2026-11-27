@@ -12,26 +12,22 @@ enum StepStatus { idle, active, permissionDenied, unavailable, unsupported }
 
 /// Converts raw pedometer readings into "steps taken since the last reading".
 ///
-/// * Android reports a cumulative counter since the phone booted. Steps taken while the
-///   app was closed are still counted: the next reading includes them.
-/// * iOS reports steps since the stream started, i.e. it starts from 0 each session.
-/// * A reading lower than the previous one means the phone rebooted (Android).
+/// On both platforms the `pedometer` plugin reports a cumulative count since the phone
+/// last booted (on iOS it queries CMPedometer from the boot date), so every reading is
+/// compared with the last saved one. Steps taken while the app was closed are still
+/// counted: the next reading includes them. The very first reading is only a baseline.
+///
+/// A reading lower than the previous one:
+/// * Android: the phone rebooted, so the new value is all new steps.
+/// * iOS: either a reboot or CMPedometer dropping data older than 7 days. The two can't
+///   be told apart, so the reading only becomes the new baseline (never double-counts).
 @visibleForTesting
 class StepMath {
   static const maxPlausibleDelta = 100000;
 
-  static int delta({required int? previous, required int current, required bool firstInSession, required bool countsFromZeroEachSession}) {
-    if (current < 0) return 0;
-    int d;
-    if (countsFromZeroEachSession) {
-      d = firstInSession || previous == null || current < previous ? current : current - previous;
-    } else if (previous == null) {
-      d = 0; // first reading ever: only a baseline
-    } else if (current < previous) {
-      d = current; // counter reset after reboot
-    } else {
-      d = current - previous;
-    }
+  static int delta({required int? previous, required int current, required bool dropMeansReboot}) {
+    if (current < 0 || previous == null) return 0;
+    final d = current >= previous ? current - previous : (dropMeansReboot ? current : 0);
     return d > maxPlausibleDelta ? 0 : d;
   }
 }
@@ -46,11 +42,10 @@ class StepTracker extends ChangeNotifier {
   DailyActivity today = DailyActivity(day: dayKey(DateTime.now()));
 
   StreamSubscription<StepCount>? _sub;
-  bool _firstInSession = true;
   Future<void> _queue = Future.value();
 
   bool get _isMobile => !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
-  bool get _iosStyle => defaultTargetPlatform == TargetPlatform.iOS;
+  bool get _isIos => defaultTargetPlatform == TargetPlatform.iOS;
 
   Future<void> start(int userId) async {
     if (_userId == userId && _sub != null) return;
@@ -70,7 +65,6 @@ class StepTracker extends ChangeNotifier {
       return;
     }
 
-    _firstInSession = true;
     _sub = Pedometer.stepCountStream.listen(
       (event) => _queue = _queue.then((_) => _onReading(userId, event.steps)),
       onError: (_) => _setStatus(StepStatus.unavailable),
@@ -100,8 +94,7 @@ class StepTracker extends ChangeNotifier {
     final saved = await StorageService.getStepCounter();
     // A reading recorded for another account on this phone is only a baseline.
     final previous = saved.owner == userId ? saved.value : null;
-    final d = StepMath.delta(previous: previous, current: raw, firstInSession: _firstInSession, countsFromZeroEachSession: _iosStyle);
-    _firstInSession = false;
+    final d = StepMath.delta(previous: previous, current: raw, dropMeansReboot: !_isIos);
     await StorageService.saveStepCounter(raw, userId);
     if (status != StepStatus.active) _setStatus(StepStatus.active);
     if (d <= 0) return;
