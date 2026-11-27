@@ -27,8 +27,8 @@ workflows:
       - CrossFit1000Hills-unsigned.ipa
 
   # Needs an Apple Developer account. One-time setup in Codemagic:
-  #  1. Teams > Integrations > App Store Connect: add an API key and name it
-  #     "CrossFit1000Hills ASC" (or change the name below).
+  #  1. Settings > Integrations > Developer Portal: add an API key (named
+  #     "cfhft_adm" here; change the name below if you use another key).
   #  2. In App Store Connect, create the app with bundle ID com.crossfit1000hills.app.
   # Then this workflow signs the app and sends it to TestFlight.
   ios-testflight:
@@ -36,7 +36,7 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 60
     integrations:
-      app_store_connect: CrossFit1000Hills ASC
+      app_store_connect: cfhft_adm
     environment:
       flutter: 3.47.9
       xcode: latest
