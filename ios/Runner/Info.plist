@@ -8,6 +8,8 @@
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>CrossFit 1000 Hills</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSMotionUsageDescription</key>
 	<string>CrossFit 1000 Hills counts your daily steps to track your activity goals.</string>
 	<key>CFBundleExecutable</key>
